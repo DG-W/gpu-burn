@@ -7,3 +7,5 @@ sudo apt-get install -y nvidia-container-toolkit
 sudo apt install -y docker.io
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
+
+sudo docker build -t gpu_burn .
