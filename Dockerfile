@@ -16,4 +16,4 @@ COPY --from=builder /build/compare.ptx /app/
 
 WORKDIR /app
 
-CMD ["./gpu_burn", "-m", "100%", "-tc", "120"]
+CMD ["./gpu_burn", "-m", "100%", "-tc", "300"]
