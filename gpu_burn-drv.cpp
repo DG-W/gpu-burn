@@ -56,6 +56,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <vector>
+#include <regex>
 
 #define SIGTERM_TIMEOUT_THRESHOLD_SECS 30 // number of seconds for sigterm to kill child processes before forcing a sigkill
 
@@ -79,7 +80,11 @@ void _checkError(int rCode, std::string file, int line, std::string desc = "") {
 
 void _checkError(cublasStatus_t rCode, std::string file, int line, std::string desc = "") {
     if (rCode != CUBLAS_STATUS_SUCCESS) {
-        const char *err = cublasGetStatusString(rCode);
+#if CUBLAS_VER_MAJOR >= 12
+		const char *err = cublasGetStatusString(rCode);
+#else
+		const char *err = "";
+#endif
         throw std::runtime_error(
             (desc == "" ? std::string("Error (")
                         : (std::string("Error in ") + desc + " (")) +
@@ -295,7 +300,12 @@ template <class T> class GPU_Test {
 
 // Returns the number of devices
 int initCuda() {
-    checkError(cuInit(0));
+	try {
+		checkError(cuInit(0));
+	} catch (std::runtime_error e) {
+		fprintf(stderr, "Couldn't init CUDA: %s\n", e.what());
+		return 0;
+	}
     int deviceCount = 0;
     checkError(cuDeviceGetCount(&deviceCount));
 
@@ -373,9 +383,14 @@ int pollTemp(pid_t *p) {
     if (!myPid) {
         close(tempPipe[0]);
         dup2(tempPipe[1], STDOUT_FILENO);
+#if IS_JETSON
+        execlp("tegrastats", "tegrastats", "--interval", "5000", NULL);
+        fprintf(stderr, "Could not invoke tegrastats, no temps available\n");
+#else
         execlp("nvidia-smi", "nvidia-smi", "-l", "5", "-q", "-d", "TEMPERATURE",
                NULL);
         fprintf(stderr, "Could not invoke nvidia-smi, no temps available\n");
+#endif
 
         exit(ENODEV);
     }
@@ -398,8 +413,20 @@ void updateTemps(int handle, std::vector<int> *temps) {
 
     data[curPos - 1] = 0;
 
-    int tempValue;
+#if IS_JETSON
+    std::string data_str(data);
+    std::regex pattern("GPU@([0-9]+)C");
+    std::smatch matches;
+    if (std::regex_search(data_str, matches, pattern)) {
+        if (matches.size() > 1) {
+            int tempValue = std::stoi(matches[1]);
+            temps->at(gpuIter) = tempValue;
+            gpuIter = (gpuIter + 1) % (temps->size());
+        }
+    }
+#else
     // FIXME: The syntax of this print might change in the future..
+    int tempValue;
     if (sscanf(data,
                "		GPU Current Temp			: %d C",
                &tempValue) == 1) {
@@ -410,6 +437,7 @@ void updateTemps(int handle, std::vector<int> *temps) {
         gpuIter =
             (gpuIter + 1) %
             (temps->size()); // We rotate the iterator for N/A values as well
+#endif
 }
 
 void listenClients(std::vector<int> clientFd, std::vector<pid_t> clientPid,
@@ -627,7 +655,14 @@ template <class T>
 void launch(int runLength, bool useDoubles, bool useTensorCores,
             ssize_t useBytes, int device_id, const char * kernelFile,
             std::chrono::seconds sigterm_timeout_threshold_secs) {
+#if IS_JETSON
+    std::ifstream f_model("/proc/device-tree/model");
+    std::stringstream ss_model;
+    ss_model << f_model.rdbuf();
+    printf("%s\n", ss_model.str().c_str());
+#else
     system("nvidia-smi -L");
+#endif
 
     // Initting A and B with random data
     T *A = (T *)malloc(sizeof(T) * SIZE * SIZE);
@@ -729,7 +764,7 @@ void launch(int runLength, bool useDoubles, bool useTensorCores,
 
 void showHelp() {
     printf("GPU Burn\n");
-    printf("Usage: gpu_burn [OPTIONS] [TIME]\n\n");
+    printf("Usage: gpu-burn [OPTIONS] [TIME]\n\n");
     printf("-m X\tUse X MB of memory.\n");
     printf("-m N%%\tUse N%% of the available GPU memory.  Default is %d%%\n",
            (int)(USEMEM * 100));
@@ -745,7 +780,7 @@ void showHelp() {
     printf("Examples:\n");
     printf("  gpu-burn -d 3600 # burns all GPUs with doubles for an hour\n");
     printf(
-        "  gpu-burn -m 50%% # burns using 50% of the available GPU memory\n");
+        "  gpu-burn -m 50%% # burns using 50%% of the available GPU memory\n");
     printf("  gpu-burn -l # list GPUs\n");
     printf("  gpu-burn -i 2 # burns only GPU of index 2\n");
 }
@@ -791,7 +826,7 @@ int main(int argc, char **argv) {
                 checkError(cuDeviceGetName(device_name, 255, device_l));
                 size_t device_mem_l;
                 checkError(cuDeviceTotalMem(&device_mem_l, device_l));
-                printf("ID %i: %s, %dMB\n", i_dev, device_name,
+                printf("ID %i: %s, %ldMB\n", i_dev, device_name,
                        device_mem_l / 1000 / 1000);
             }
             thisParam++;
